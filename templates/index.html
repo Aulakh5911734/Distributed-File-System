@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DFS Dashboard</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --text: #1e293b;
+        }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 2rem;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        h1 { margin-bottom: 2rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 2rem;
+        }
+        .card {
+            background: var(--surface);
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+        h2 { margin-top: 0; font-size: 1.25rem; color: #475569; }
+        
+        /* Node List */
+        .node-list { list-style: none; padding: 0; }
+        .node-item {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .node-status {
+            width: 10px;
+            height: 10px;
+            background-color: #22c55e;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        
+        /* File List */
+        .file-list { list-style: none; padding: 0; }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            background: #f1f5f9;
+            margin-bottom: 0.5rem;
+            border-radius: 8px;
+        }
+        .btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .btn:hover { opacity: 0.9; }
+        .btn-download { background: #0f172a; }
+        
+        /* Upload Area */
+        .upload-area {
+            border: 2px dashed #cbd5e1;
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            margin-bottom: 1rem;
+            cursor: pointer;
+        }
+        .upload-area:hover { border-color: var(--primary); }
+        
+        #status-msg { margin-top: 1rem; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Distributed File System</h1>
+        
+        <div class="grid">
+            <!-- Sidebar: Nodes -->
+            <div class="card">
+                <h2>Active Nodes</h2>
+                <ul class="node-list" id="nodeList">
+                    <li>Loading...</li>
+                </ul>
+                <div style="margin-top: 1rem; font-size: 0.875rem; color: #64748b;">
+                    Nodes report heartbeat every 5s.
+                </div>
+            </div>
+            
+            <!-- Main: Files -->
+            <div class="card">
+                <h2>Files</h2>
+                
+                <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+                    <p>Click to Upload File</p>
+                    <input type="file" id="fileInput" style="display: none" onchange="handleUpload(this)">
+                </div>
+                <div id="status-msg"></div>
+                
+                <ul class="file-list" id="fileList">
+                    <!-- Files will go here -->
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const MASTER_URL = 'http://localhost:5000';
+
+        async function fetchNodes() {
+            try {
+                const res = await fetch(`${MASTER_URL}/nodes`);
+                const nodes = await res.json();
+                const list = document.getElementById('nodeList');
+                list.innerHTML = nodes.map(url => `
+                    <li class="node-item">
+                        <div class="node-status"></div>
+                        ${url}
+                    </li>
+                `).join('') || '<li style="padding:1rem">No active nodes</li>';
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function fetchFiles() {
+            try {
+                const res = await fetch(`${MASTER_URL}/ls`);
+                const files = await res.json();
+                const list = document.getElementById('fileList');
+                list.innerHTML = files.map(file => `
+                    <li class="file-item">
+                        <span>${file}</span>
+                        <button class="btn btn-download" onclick="downloadFile('${file}')">Download</button>
+                    </li>
+                `).join('') || '<li style="padding:1rem">No files found</li>';
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function handleUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
+            
+            const status = document.getElementById('status-msg');
+            status.textContent = `Preparing to upload ${file.name}...`;
+            status.style.color = 'blue';
+
+            try {
+                // 1. Request allocation from Master
+                const res = await fetch(`${MASTER_URL}/upload`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        filename: file.name,
+                        filesize: file.size
+                    })
+                });
+                
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                const { chunk_id, nodes } = data;
+                
+                // 2. Upload to all chunk servers (Client-side Replication)
+                status.textContent = `Replicating to ${nodes.length} nodes...`;
+                
+                const uploadPromises = nodes.map(async (nodeUrl) => {
+                    const formData = new FormData();
+                    formData.append('chunk_id', chunk_id);
+                    formData.append('file', file);
+                    
+                    try {
+                        const r = await fetch(`${nodeUrl}/write_chunk`, {
+                            method: 'POST',
+                            body: formData
+                        });
+                        if (!r.ok) throw new Error('Failed');
+                        return true;
+                    } catch (e) {
+                        console.error(`Failed to upload to ${nodeUrl}`, e);
+                        return false;
+                    }
+                });
+                
+                await Promise.all(uploadPromises);
+                
+                status.textContent = 'Upload Complete!';
+                status.style.color = 'green';
+                fetchFiles(); // Refresh list
+                
+            } catch (e) {
+                status.textContent = `Error: ${e.message}`;
+                status.style.color = 'red';
+            }
+            input.value = ''; // Reset
+        }
+
+        async function downloadFile(filename) {
+            const status = document.getElementById('status-msg');
+            status.textContent = `Locating ${filename}...`;
+            
+            try {
+                // 1. Get location
+                const res = await fetch(`${MASTER_URL}/download?filename=${filename}`);
+                if (!res.ok) throw new Error('File not found');
+                const data = await res.json();
+                
+                if (!data.chunks || data.chunks.length === 0) throw new Error('No chunks found');
+                
+                // 2. Try to download from the first available node
+                const chunk = data.chunks[0]; // Assuming 1 chunk for now
+                const nodes = chunk.nodes;
+                
+                // Simple approach: Redirect user to the first node's read endpoint
+                // In a real app, we might fetch blob and save.
+                if (nodes.length > 0) {
+                    const nodeUrl = nodes[0];
+                    const downloadUrl = `${nodeUrl}/read_chunk?chunk_id=${chunk.chunk_id}`;
+                    
+                    // Fetch as blob to force download with correct filename
+                    const blobRes = await fetch(downloadUrl);
+                    const blob = await blobRes.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    
+                    status.textContent = 'Download started.';
+                } else {
+                    throw new Error('No active nodes have this file.');
+                }
+                
+            } catch (e) {
+                status.textContent = `Download Error: ${e.message}`;
+                status.style.color = 'red';
+            }
+        }
+
+        // Initial Load
+        fetchNodes();
+        fetchFiles();
+        setInterval(fetchNodes, 5000); // Refresh nodes every 5s
+    </script>
+</body>
+</html>
